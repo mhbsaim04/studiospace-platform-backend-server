@@ -119,13 +119,8 @@ function sessionCookie(req) {
     return null
 }
 
-/**
- * Auth middleware (Challenge 1). Accepts a better-auth JWT issued by the frontend:
- * the signature is verified against the app's JWKS, then the user is resolved from the
- * payload's `sub` so handlers get `req.user`. As a fallback it accepts the raw better-auth
- * session token (Bearer header or the HTTPOnly session cookie), looked up in `session`.
- * Anything else is rejected with 401.
- */
+
+
 export const verifyToken = async (req, res, next) => {
     const authHeader = req.headers.authorization
     const token = authHeader?.startsWith('Bearer ')
