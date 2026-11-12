@@ -45,7 +45,7 @@ await Promise.all([
     wishlistCollection.createIndex({ userEmail: 1, studioId: 1 }, { unique: true }),
 ])
 
-/* ===================== UTILS ===================== */
+
 
 class HttpError extends Error {
     constructor(status, message) {
@@ -73,7 +73,8 @@ function toMinutes(time) {
     return Number(m[1]) * 60 + Number(m[2])
 }
 
-// Validates + sanitises a studio body. Owner fields come from the token, never from the body.
+
+// Validates + sanitises a studio body.
 function parseStudioBody(body = {}) {
     const title = str(body.title)
     const category = str(body.category)
@@ -98,14 +99,10 @@ function parseStudioBody(body = {}) {
     return { title, category, hourlyRate, securityDeposit, maxCapacity, location, image, overview, amenities, gallery }
 }
 
-/* ===================== AUTH MIDDLEWARE ===================== */
 
-// better-auth (Next side) publishes its signing keys here — Bearer JWTs (issued by
-// the better-auth `jwt()` plugin in auth.ts) are verified against this key set.
-// Override with JWKS_URL when running the backend against a different frontend host.
+// JWT
 const JWKS = createRemoteJWKSet(new URL(process.env.JWKS_URL ?? `${CLIENT_URLS[0]}/api/auth/jwks`))
 
-// Reads the HTTPOnly better-auth session cookie (works when requests are proxied through the Next origin).
 function cookieValue(req, names) {
     for (const part of (req.headers.cookie ?? '').split(';')) {
         const [name, ...rest] = part.trim().split('=')
@@ -114,10 +111,7 @@ function cookieValue(req, names) {
     return null
 }
 const sessionCookie = (req) => cookieValue(req, ['better-auth.session_token', '__Secure-better-auth.session_token'])
-// The JWT the Next app issues at /api/token — an HS256 token signed with the shared JWT_SECRET.
-const studiospaceCookie = (req) => cookieValue(req, ['studiospace_token'])
-// The cookie-cache session cookie from auth.ts (session.cookieCache.strategy = 'jwt').
-// better-auth chunks cookies over ~4KB as name.0, name.1, … — rejoin them in order.
+
 function sessionDataCookie(req) {
     const parts = []
     for (const part of (req.headers.cookie ?? '').split(';')) {
@@ -134,11 +128,10 @@ export const verifyToken = async (req, res, next) => {
     const bearer = authHeader?.startsWith('Bearer ')
         ? authHeader.slice('Bearer '.length).trim()
         : null
-    const studiospaceJwt = studiospaceCookie(req)
+    const sessionDataJwt = sessionDataCookie(req)
     const sessionToken0 = sessionCookie(req)
-    const token = bearer ?? studiospaceJwt ?? sessionToken0
 
-    if (!token) {
+    if (!bearer && !sessionDataJwt && !sessionToken0) {
         return res.status(401).send({ message: 'Unauthorized: please log in to continue.' })
     }
 
@@ -150,7 +143,7 @@ export const verifyToken = async (req, res, next) => {
     }
     const asReqUser = (user) => ({ id: String(user._id), email: user.email, name: user.name ?? 'Creator', image: user.image })
 
-    // Path 1: a Bearer JWT signed by better-auth (verified against its published JWKS).
+    // Path 1: a Bearer JWT signed by better-auth's jwt() plugin (verified against its published JWKS).
     if (bearer) {
         try {
             const { payload } = await jwtVerify(bearer, JWKS)
@@ -161,31 +154,14 @@ export const verifyToken = async (req, res, next) => {
             req.user = asReqUser(user)
             return next()
         } catch {
-            // Not a JWKS-verifiable JWT (or expired) — fall through to the session-token lookup.
+            // Not a JWKS-verifiable JWT (or expired) — fall through to the cookie paths.
         }
     }
 
-    // Path 2: the studiospace_token HTTPOnly cookie — HS256 JWT minted by the Next app's
-    // /api/token route. Requires the same JWT_SECRET as the frontend's .env.
-    if (studiospaceJwt && process.env.JWT_SECRET) {
-        try {
-            const { payload } = await jwtVerify(studiospaceJwt, new TextEncoder().encode(process.env.JWT_SECRET))
-            const user = await resolveUser(payload.sub)
-            if (!user) {
-                return res.status(401).send({ message: 'User for this token no longer exists.' })
-            }
-            req.user = asReqUser(user)
-            return next()
-        } catch {
-            // Invalid/expired JWT — fall through to the session-token lookup.
-        }
-    }
-
-    // Path 3: the better-auth cookie-cache session cookie. With auth.ts's
+    // Path 2: the better-auth cookie-cache session cookie. With auth.ts's
     // session.cookieCache { strategy: 'jwt' }, better-auth stores the session in
     // `better-auth.session_data` as an HS256 JWT signed with BETTER_AUTH_SECRET,
     // payload: { session: { userId, token, expiresAt, … }, user: { id, email, … } }.
-    const sessionDataJwt = sessionDataCookie(req)
     if (sessionDataJwt && process.env.BETTER_AUTH_SECRET) {
         try {
             const { payload } = await jwtVerify(sessionDataJwt, new TextEncoder().encode(process.env.BETTER_AUTH_SECRET))
@@ -202,7 +178,7 @@ export const verifyToken = async (req, res, next) => {
     }
 
     // Fallback: raw better-auth session token ("token.signature" cookie value).
-    const sessionToken = token.split('.')[0]
+    const sessionToken = sessionToken0.split('.')[0]
     const session = await sessionCollection.findOne({ token: sessionToken })
     if (!session || new Date(session.expiresAt) < new Date()) {
         return res.status(401).send({ message: 'Invalid or expired token.' })
@@ -217,7 +193,7 @@ export const verifyToken = async (req, res, next) => {
     next()
 }
 
-/* ===================== STUDIOS ===================== */
+
 
 const NO_REVIEWS = { projection: { reviews: 0 } }
 
