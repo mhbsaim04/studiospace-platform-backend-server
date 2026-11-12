@@ -3,7 +3,7 @@ import { MongoClient, ObjectId } from 'mongodb'
 import cors from 'cors'
 import 'dotenv/config'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import { randomUUID } from 'node:crypto'
+
 
 const app = express()
 const PORT = 7000
@@ -136,14 +136,14 @@ export const verifyToken = async (req, res, next) => {
     }
 
     const resolveUser = async (userId) => {
-        // better-auth users may be stored with ObjectId or string ids; accept either form.
+        
         const id = String(userId)
         const _id = objectId(id)
         return userCollection.findOne({ _id: { $in: _id ? [_id, id] : [id] } })
     }
     const asReqUser = (user) => ({ id: String(user._id), email: user.email, name: user.name ?? 'Creator', image: user.image })
 
-    // Path 1: a Bearer JWT signed by better-auth's jwt() plugin (verified against its published JWKS).
+    
     if (bearer) {
         try {
             const { payload } = await jwtVerify(bearer, JWKS)
@@ -154,14 +154,11 @@ export const verifyToken = async (req, res, next) => {
             req.user = asReqUser(user)
             return next()
         } catch {
-            // Not a JWKS-verifiable JWT (or expired) — fall through to the cookie paths.
+            
         }
     }
 
-    // Path 2: the better-auth cookie-cache session cookie. With auth.ts's
-    // session.cookieCache { strategy: 'jwt' }, better-auth stores the session in
-    // `better-auth.session_data` as an HS256 JWT signed with BETTER_AUTH_SECRET,
-    // payload: { session: { userId, token, expiresAt, … }, user: { id, email, … } }.
+
     if (sessionDataJwt && process.env.BETTER_AUTH_SECRET) {
         try {
             const { payload } = await jwtVerify(sessionDataJwt, new TextEncoder().encode(process.env.BETTER_AUTH_SECRET))
@@ -177,7 +174,7 @@ export const verifyToken = async (req, res, next) => {
         }
     }
 
-    // Fallback: raw better-auth session token ("token.signature" cookie value).
+    
     const sessionToken = sessionToken0.split('.')[0]
     const session = await sessionCollection.findOne({ token: sessionToken })
     if (!session || new Date(session.expiresAt) < new Date()) {
@@ -228,13 +225,13 @@ app.get('/api/studios', async (req, res) => {
     res.send({ items, total, page, pages: Math.max(1, Math.ceil(total / limit)) })
 })
 
-// Public: home page — 6 top-rated / newest studios
+
 app.get('/api/studios/featured', async (req, res) => {
     const result = await studioCollection.find({}, NO_REVIEWS).sort({ rating: -1, createdAt: -1 }).limit(6).toArray()
     res.send(result)
 })
 
-// Studios owned by the logged-in user
+
 app.get('/api/studios/mine', verifyToken, async (req, res) => {
     const result = await studioCollection.find({ ownerEmail: req.user.email }, NO_REVIEWS).sort({ createdAt: -1 }).toArray()
     res.send(result)
@@ -250,7 +247,7 @@ app.get('/api/studios/:id', async (req, res) => {
     res.send(result)
 })
 
-// Public: confirmed slots for a date (live availability in the booking modal)
+
 app.get('/api/studios/:id/availability', async (req, res) => {
     const _id = objectId(req.params.id)
     if (!_id) return res.status(400).send({ message: 'Invalid studio id.' })
@@ -264,7 +261,7 @@ app.get('/api/studios/:id/availability', async (req, res) => {
     res.send(slots.map((s) => ({ startTime: s.startTime, endTime: s.endTime })))
 })
 
-// The owner is stamped from the token server-side, so nobody can list under someone else's account.
+
 app.post('/api/studios', verifyToken, async (req, res) => {
     const data = parseStudioBody(req.body)
     const now = new Date()
@@ -283,7 +280,7 @@ app.post('/api/studios', verifyToken, async (req, res) => {
     res.status(201).send({ ...doc, _id: result.insertedId })
 })
 
-// Ownership is enforced in the query itself + id is cast to ObjectId.
+
 app.put('/api/studios/:id', verifyToken, async (req, res) => {
     const _id = objectId(req.params.id)
     if (!_id) return res.status(400).send({ message: 'Invalid studio id.' })
@@ -320,7 +317,7 @@ app.delete('/api/studios/:id', verifyToken, async (req, res) => {
     res.send({ message: 'Studio deleted.' })
 })
 
-// One review per user per studio (re-posting replaces it); rating is recalculated.
+
 app.post('/api/studios/:id/reviews', verifyToken, async (req, res) => {
     const _id = objectId(req.params.id)
     if (!_id) return res.status(400).send({ message: 'Invalid studio id.' })
@@ -340,13 +337,7 @@ app.post('/api/studios/:id/reviews', verifyToken, async (req, res) => {
     res.status(201).send({ message: 'Review added.' })
 })
 
-/* ===================== BOOKINGS ===================== */
-
-/**
- * Challenge 2 — double-booking prevention.
- * Ranges [a,b) and [c,d) overlap when a < d AND c < b, so we look for Confirmed bookings
- * on the same studio + date with startMin < newEnd AND endMin > newStart.
- */
+// Bookings
 function findConflict(studioId, date, startMin, endMin, excludeId) {
     const query = { studioId, date, status: 'Confirmed', startMin: { $lt: endMin }, endMin: { $gt: startMin } }
     if (excludeId) query._id = { $ne: excludeId }
@@ -354,7 +345,7 @@ function findConflict(studioId, date, startMin, endMin, excludeId) {
 }
 const conflictMessage = (c) => `This time overlaps with a confirmed booking(${ c.startTime } - ${ c.endTime }) on ${ c.date }. Please pick a different slot.`
 
-// Booking creation: the guest is stamped from the token, saved as "Pending".
+
 app.post('/api/bookings', verifyToken, async (req, res) => {
     const { studioId, date, startTime, endTime, notes } = req.body ?? {}
     const _studioId = mustObjectId(studioId, 'studio id')
@@ -443,7 +434,7 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
     res.send({ message: `Booking ${ next.toLowerCase() }.`, status: next })
 })
 
-/* ===================== WISHLIST + STATS ===================== */
+// WISHLIST and STATS 
 
 app.get('/api/wishlist', verifyToken, async (req, res) => {
     const saved = await wishlistCollection.find({ userEmail: req.user.email }).sort({ createdAt: -1 }).toArray()
@@ -487,11 +478,11 @@ app.get('/api/health', (req, res) => {
     res.send({ ok: true, service: 'studiospace-api' })
 })
 
-/* ===================== ERRORS ===================== */
 
+// Errors
 app.use((req, res) => res.status(404).send({ message: 'Route not found.' }))
 
-// Express 5 forwards rejected async handlers here, so routes need no try/catch.
+
 app.use((err, req, res, next) => {
     if (err instanceof HttpError) return res.status(err.status).send({ message: err.message })
     console.error(err)
@@ -499,9 +490,7 @@ app.use((err, req, res, next) => {
 })
 
 
-/* ===================== START ===================== */
 
-// Locally we listen on a port; on Vercel the exported app runs as a serverless function.
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
         console.log(`Server is running at ${ PORT } `)
