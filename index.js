@@ -16,14 +16,9 @@ app.use(express.json({ limit: '1mb' }))
 const client = new MongoClient(process.env.MONGODB_URI)
 
 export async function connectToMongoDB() {
-    try {
-        await client.connect()
-        console.log('You successfully connected to MongoDB!')
-        return client
-    } catch (err) {
-        console.dir(err)
-        throw err
-    }
+    await client.connect()
+    console.log('You successfully connected to MongoDB!')
+    return client
 }
 const mongoClient = await connectToMongoDB()
 const db = mongoClient.db('studiospace')
@@ -31,8 +26,6 @@ const db = mongoClient.db('studiospace')
 const studioCollection = db.collection('studios')
 const bookingCollection = db.collection('bookings')
 const wishlistCollection = db.collection('wishlists')
-
-
 const sessionCollection = db.collection('session')
 const userCollection = db.collection('user')
 
@@ -45,7 +38,7 @@ await Promise.all([
     wishlistCollection.createIndex({ userEmail: 1, studioId: 1 }, { unique: true }),
 ])
 
-
+//UTILS 
 
 class HttpError extends Error {
     constructor(status, message) {
@@ -73,8 +66,7 @@ function toMinutes(time) {
     return Number(m[1]) * 60 + Number(m[2])
 }
 
-
-// Validates + sanitises a studio body.
+// Validates + sanitises a studio body. Owner fields come from the token, never from the body.
 function parseStudioBody(body = {}) {
     const title = str(body.title)
     const category = str(body.category)
@@ -99,8 +91,8 @@ function parseStudioBody(body = {}) {
     return { title, category, hourlyRate, securityDeposit, maxCapacity, location, image, overview, amenities, gallery }
 }
 
+//AUTH MIDDLEWARE 
 
-// JWT
 const JWKS = createRemoteJWKSet(new URL(process.env.JWKS_URL ?? `${CLIENT_URLS[0]}/api/auth/jwks`))
 
 function cookieValue(req, names) {
@@ -111,6 +103,8 @@ function cookieValue(req, names) {
     return null
 }
 const sessionCookie = (req) => cookieValue(req, ['better-auth.session_token', '__Secure-better-auth.session_token'])
+
+// The cookie-cache session cookie from auth.ts (session.cookieCache.strategy = 'jwt').
 
 function sessionDataCookie(req) {
     const parts = []
@@ -136,14 +130,15 @@ export const verifyToken = async (req, res, next) => {
     }
 
     const resolveUser = async (userId) => {
-        
+        // better-auth users may be stored with ObjectId or string ids; accept either form.
         const id = String(userId)
         const _id = objectId(id)
         return userCollection.findOne({ _id: { $in: _id ? [_id, id] : [id] } })
     }
     const asReqUser = (user) => ({ id: String(user._id), email: user.email, name: user.name ?? 'Creator', image: user.image })
 
-    
+
+    // Path 1: a Bearer JWT signed by better-auth's jwt() plugin 
     if (bearer) {
         try {
             const { payload } = await jwtVerify(bearer, JWKS)
@@ -154,11 +149,12 @@ export const verifyToken = async (req, res, next) => {
             req.user = asReqUser(user)
             return next()
         } catch {
-            
+            // Not a JWKS-verifiable JWT (or expired) — fall through to the cookie paths.
         }
     }
 
 
+    // Path 2: the better-auth cookie-cache session cookie.
     if (sessionDataJwt && process.env.BETTER_AUTH_SECRET) {
         try {
             const { payload } = await jwtVerify(sessionDataJwt, new TextEncoder().encode(process.env.BETTER_AUTH_SECRET))
@@ -174,7 +170,7 @@ export const verifyToken = async (req, res, next) => {
         }
     }
 
-    
+    // Fallback
     const sessionToken = sessionToken0.split('.')[0]
     const session = await sessionCollection.findOne({ token: sessionToken })
     if (!session || new Date(session.expiresAt) < new Date()) {
@@ -190,13 +186,13 @@ export const verifyToken = async (req, res, next) => {
     next()
 }
 
-
+//STUDIOS 
 
 const NO_REVIEWS = { projection: { reviews: 0 } }
 
 // Public: list + search + filter + sort + pagination
 app.get('/api/studios', async (req, res) => {
-    const { search, category, sort = 'newest', minPrice, maxPrice } = req.query
+    const { search, category, sort = 'newest', maxPrice } = req.query
     const page = Math.max(1, Number(req.query.page) || 1)
     const limit = Math.min(48, Math.max(1, Number(req.query.limit) || 9))
 
@@ -206,11 +202,7 @@ app.get('/api/studios', async (req, res) => {
         const rx = new RegExp(escapeRegex(String(search).trim()), 'i')
         filter.$or = [{ title: rx }, { location: rx }, { overview: rx }, { amenities: rx }]
     }
-    if (minPrice || maxPrice) {
-        filter.hourlyRate = {}
-        if (minPrice) filter.hourlyRate.$gte = Number(minPrice)
-        if (maxPrice) filter.hourlyRate.$lte = Number(maxPrice)
-    }
+    if (maxPrice) filter.hourlyRate = { $lte: Number(maxPrice) }
     const sortMap = {
         newest: { createdAt: -1 },
         rating: { rating: -1, reviewCount: -1 },
@@ -237,7 +229,7 @@ app.get('/api/studios/mine', verifyToken, async (req, res) => {
     res.send(result)
 })
 
-// Public: guests can browse details without logging in.
+
 app.get('/api/studios/:id', async (req, res) => {
     const _id = objectId(req.params.id)
     if (!_id) return res.status(400).send({ message: 'Invalid studio id.' })
@@ -261,7 +253,7 @@ app.get('/api/studios/:id/availability', async (req, res) => {
     res.send(slots.map((s) => ({ startTime: s.startTime, endTime: s.endTime })))
 })
 
-
+// The owner is stamped from the token server-side, so nobody can list under someone else's account.
 app.post('/api/studios', verifyToken, async (req, res) => {
     const data = parseStudioBody(req.body)
     const now = new Date()
@@ -337,7 +329,8 @@ app.post('/api/studios/:id/reviews', verifyToken, async (req, res) => {
     res.status(201).send({ message: 'Review added.' })
 })
 
-// Bookings
+//BOOKINGS 
+
 function findConflict(studioId, date, startMin, endMin, excludeId) {
     const query = { studioId, date, status: 'Confirmed', startMin: { $lt: endMin }, endMin: { $gt: startMin } }
     if (excludeId) query._id = { $ne: excludeId }
@@ -434,7 +427,7 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
     res.send({ message: `Booking ${ next.toLowerCase() }.`, status: next })
 })
 
-// WISHLIST and STATS 
+//WISHLIST and STATS
 
 app.get('/api/wishlist', verifyToken, async (req, res) => {
     const saved = await wishlistCollection.find({ userEmail: req.user.email }).sort({ createdAt: -1 }).toArray()
@@ -442,7 +435,7 @@ app.get('/api/wishlist', verifyToken, async (req, res) => {
     res.send(result)
 })
 
-// Toggle: saves the studio if it isn't saved yet, otherwise removes it.
+
 app.post('/api/wishlist/:studioId', verifyToken, async (req, res) => {
     const studioId = objectId(req.params.studioId)
     if (!studioId) return res.status(400).send({ message: 'Invalid studio id.' })
@@ -478,17 +471,18 @@ app.get('/api/health', (req, res) => {
     res.send({ ok: true, service: 'studiospace-api' })
 })
 
+// ERRORS
 
-// Errors
 app.use((req, res) => res.status(404).send({ message: 'Route not found.' }))
 
-
+// Express 5 forwards rejected async handlers here, so routes need no try/catch.
 app.use((err, req, res, next) => {
     if (err instanceof HttpError) return res.status(err.status).send({ message: err.message })
     console.error(err)
     res.status(500).send({ message: 'Something went wrong on the server.' })
 })
 
+//START 
 
 
 if (!process.env.VERCEL) {
