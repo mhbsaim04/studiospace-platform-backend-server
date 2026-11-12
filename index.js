@@ -109,23 +109,25 @@ const JWKS = createRemoteJWKSet(
 )
 
 // Reads the HTTPOnly better-auth session cookie (works when requests are proxied through the Next origin).
-function sessionCookie(req) {
+function cookieValue(req, names) {
     for (const part of (req.headers.cookie ?? '').split(';')) {
         const [name, ...rest] = part.trim().split('=')
-        if (name === 'better-auth.session_token' || name === '__Secure-better-auth.session_token') {
-            return decodeURIComponent(rest.join('='))
-        }
+        if (names.includes(name)) return decodeURIComponent(rest.join('='))
     }
     return null
 }
-
-
+const sessionCookie = (req) => cookieValue(req, ['better-auth.session_token', '__Secure-better-auth.session_token'])
+// The JWT the Next app issues at /api/token — an HS256 token signed with the shared JWT_SECRET.
+const studiospaceCookie = (req) => cookieValue(req, ['studiospace_token'])
 
 export const verifyToken = async (req, res, next) => {
     const authHeader = req.headers.authorization
-    const token = authHeader?.startsWith('Bearer ')
+    const bearer = authHeader?.startsWith('Bearer ')
         ? authHeader.slice('Bearer '.length).trim()
-        : sessionCookie(req)
+        : null
+    const studiospaceJwt = studiospaceCookie(req)
+    const sessionToken0 = sessionCookie(req)
+    const token = bearer ?? studiospaceJwt ?? sessionToken0
 
     if (!token) {
         return res.status(401).send({ message: 'Unauthorized: please log in to continue.' })
@@ -139,17 +141,35 @@ export const verifyToken = async (req, res, next) => {
     }
     const asReqUser = (user) => ({ id: String(user._id), email: user.email, name: user.name ?? 'Creator', image: user.image })
 
-    // Primary path: a real JWT signed by the frontend.
-    try {
-        const { payload } = await jwtVerify(token, JWKS)
-        const user = await resolveUser(payload.sub)
-        if (!user) {
-            return res.status(401).send({ message: 'User for this token no longer exists.' })
+    // Path 1: a Bearer JWT signed by better-auth (verified against its published JWKS).
+    if (bearer) {
+        try {
+            const { payload } = await jwtVerify(bearer, JWKS)
+            const user = await resolveUser(payload.sub)
+            if (!user) {
+                return res.status(401).send({ message: 'User for this token no longer exists.' })
+            }
+            req.user = asReqUser(user)
+            return next()
+        } catch {
+            // Not a JWKS-verifiable JWT (or expired) — fall through to the session-token lookup.
         }
-        req.user = asReqUser(user)
-        return next()
-    } catch {
-        // Not a JWT (or expired) — fall through to the session-token lookup.
+    }
+
+    // Path 2: the studiospace_token HTTPOnly cookie — HS256 JWT minted by the Next app's
+    // /api/token route. Requires the same JWT_SECRET as the frontend's .env.
+    if (studiospaceJwt && process.env.JWT_SECRET) {
+        try {
+            const { payload } = await jwtVerify(studiospaceJwt, new TextEncoder().encode(process.env.JWT_SECRET))
+            const user = await resolveUser(payload.sub)
+            if (!user) {
+                return res.status(401).send({ message: 'User for this token no longer exists.' })
+            }
+            req.user = asReqUser(user)
+            return next()
+        } catch {
+            // Invalid/expired JWT — fall through to the session-token lookup.
+        }
     }
 
     // Fallback: raw better-auth session token ("token.signature" cookie value).
