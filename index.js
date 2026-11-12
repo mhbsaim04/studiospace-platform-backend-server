@@ -100,12 +100,10 @@ function parseStudioBody(body = {}) {
 
 /* ===================== AUTH MIDDLEWARE ===================== */
 
-// better-auth (Next side) publishes its signing keys here — the JWT middleware
-// verifies incoming Bearer tokens against this key set. Override with
-// JWKS_URL when running the backend against a different frontend host.
-const JWKS = createRemoteJWKSet(
-    new URL(process.env.JWKS_URL ?? `${CLIENT_URLS[0]}/api/auth/jwks`)
-)
+// better-auth (Next side) publishes its signing keys here — Bearer JWTs (issued by
+// the better-auth `jwt()` plugin in auth.ts) are verified against this key set.
+// Override with JWKS_URL when running the backend against a different frontend host.
+const JWKS = createRemoteJWKSet(new URL(process.env.JWKS_URL ?? `${CLIENT_URLS[0]}/api/auth/jwks`))
 
 // Reads the HTTPOnly better-auth session cookie (works when requests are proxied through the Next origin).
 function cookieValue(req, names) {
@@ -118,6 +116,18 @@ function cookieValue(req, names) {
 const sessionCookie = (req) => cookieValue(req, ['better-auth.session_token', '__Secure-better-auth.session_token'])
 // The JWT the Next app issues at /api/token — an HS256 token signed with the shared JWT_SECRET.
 const studiospaceCookie = (req) => cookieValue(req, ['studiospace_token'])
+// The cookie-cache session cookie from auth.ts (session.cookieCache.strategy = 'jwt').
+// better-auth chunks cookies over ~4KB as name.0, name.1, … — rejoin them in order.
+function sessionDataCookie(req) {
+    const parts = []
+    for (const part of (req.headers.cookie ?? '').split(';')) {
+        const [name, ...rest] = part.trim().split('=')
+        if (name === 'better-auth.session_data' || name === '__Secure-better-auth.session_data') return decodeURIComponent(rest.join('='))
+        const chunk = /^(?:__Secure-)?better-auth\.session_data\.(\d+)$/.exec(name ?? '')
+        if (chunk) parts[Number(chunk[1])] = decodeURIComponent(rest.join('='))
+    }
+    return parts.length ? parts.filter(Boolean).join('') : null
+}
 
 export const verifyToken = async (req, res, next) => {
     const authHeader = req.headers.authorization
@@ -168,6 +178,26 @@ export const verifyToken = async (req, res, next) => {
             return next()
         } catch {
             // Invalid/expired JWT — fall through to the session-token lookup.
+        }
+    }
+
+    // Path 3: the better-auth cookie-cache session cookie. With auth.ts's
+    // session.cookieCache { strategy: 'jwt' }, better-auth stores the session in
+    // `better-auth.session_data` as an HS256 JWT signed with BETTER_AUTH_SECRET,
+    // payload: { session: { userId, token, expiresAt, … }, user: { id, email, … } }.
+    const sessionDataJwt = sessionDataCookie(req)
+    if (sessionDataJwt && process.env.BETTER_AUTH_SECRET) {
+        try {
+            const { payload } = await jwtVerify(sessionDataJwt, new TextEncoder().encode(process.env.BETTER_AUTH_SECRET))
+            const userId = payload.user?.id ?? payload.session?.userId
+            const user = userId ? await resolveUser(userId) : null
+            if (!user) {
+                return res.status(401).send({ message: 'User for this session no longer exists.' })
+            }
+            req.user = asReqUser(user)
+            return next()
+        } catch {
+            // Expired/invalid cache cookie — fall through to the session-token lookup.
         }
     }
 
@@ -346,7 +376,7 @@ function findConflict(studioId, date, startMin, endMin, excludeId) {
     if (excludeId) query._id = { $ne: excludeId }
     return bookingCollection.findOne(query)
 }
-const conflictMessage = (c) => `This time overlaps with a confirmed booking (${c.startTime} - ${c.endTime}) on ${c.date}. Please pick a different slot.`
+const conflictMessage = (c) => `This time overlaps with a confirmed booking(${ c.startTime } - ${ c.endTime }) on ${ c.date }. Please pick a different slot.`
 
 // Booking creation: the guest is stamped from the token, saved as "Pending".
 app.post('/api/bookings', verifyToken, async (req, res) => {
@@ -426,7 +456,7 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
             return res.status(400).send({ message: 'You can only cancel bookings that are still pending.' })
         }
     } else if (!(HOST_TRANSITIONS[booking.status] ?? []).includes(next)) {
-        return res.status(400).send({ message: `A ${booking.status.toLowerCase()} booking cannot be changed to ${next.toLowerCase()}.` })
+        return res.status(400).send({ message: `A ${ booking.status.toLowerCase() } booking cannot be changed to ${ next.toLowerCase() }.` })
     }
 
     if (next === 'Confirmed') {
@@ -434,7 +464,7 @@ app.patch('/api/bookings/:id/status', verifyToken, async (req, res) => {
         if (conflict) return res.status(409).send({ message: conflictMessage(conflict) })
     }
     await bookingCollection.updateOne({ _id }, { $set: { status: next, updatedAt: new Date() } })
-    res.send({ message: `Booking ${next.toLowerCase()}.`, status: next })
+    res.send({ message: `Booking ${ next.toLowerCase() }.`, status: next })
 })
 
 /* ===================== WISHLIST + STATS ===================== */
@@ -498,7 +528,7 @@ app.use((err, req, res, next) => {
 // Locally we listen on a port; on Vercel the exported app runs as a serverless function.
 if (!process.env.VERCEL) {
     app.listen(PORT, () => {
-        console.log(`Server is running at ${PORT}`)
+        console.log(`Server is running at ${ PORT } `)
     })
 }
 
