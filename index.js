@@ -32,8 +32,7 @@ const studioCollection = db.collection('studios')
 const bookingCollection = db.collection('bookings')
 const wishlistCollection = db.collection('wishlists')
 
-// better-auth stores its sessions + users in the same database — the auth middleware
-// resolves a Bearer token (or the session cookie) back to a real user through these.
+
 const sessionCollection = db.collection('session')
 const userCollection = db.collection('user')
 
